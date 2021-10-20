@@ -1,0 +1,3 @@
+google-cloud-storage==1.16.1
+earthengine-api
+rasterio
