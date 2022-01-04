@@ -32,6 +32,9 @@ def addNDVI(image):
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
     return image.addBands(ndvi);
 
+def addNDWI(image):
+    ndwi = image.select('B8').subtract(image.select('B12')).divide(image.select('B8').add(image.select('B12'))).rename('NDWI')
+    return image.addBands(ndwi)
 
 def cors_enabled_function(request):
 
@@ -58,52 +61,62 @@ def cors_enabled_function(request):
 
         if request_json and 'coords' in request_json:
             coords = request_json['coords']
+            realCoords = json.loads(coords)
+  
         elif request_args and 'coords' in request_args:
             coords = request_args('coords')
+            realCoords = json.loads(coords)
+        else:
+            coords = request.data
+            realCoords = json.loads(coords)['coords']
 
         print(coords)
-        realCoords = json.loads(coords)
+        
         print(realCoords)
 
         geometry = ee.Geometry.Polygon(realCoords);
         
-        # today = date.today()
-        # start = str(today.year) + "-" + str(today.month) + "-" + str(today.day)
-        
-        # a_month_ago = date.today() - datetime.timedelta(days = 30)
-        # end = str(a_month_ago.year) + "-" + str(a_month_ago.month-1) + "-" + str(a_month_ago.day)
-        
+        # Base Image
         S2_SR = ee.ImageCollection('COPERNICUS/S2_SR').filterBounds(geometry) #.filterDate(end, start);
 
-
-        
         # Apply this function across your image collection
-        S2_NDVI = S2_SR.map(addNDVI);
+        S2_NDVI = S2_SR.map(addNDVI);  
+        S2_NDWI = S2_SR.map(addNDWI);
         
         # Sort the image collection by date and select the most recent image
-        recent_S2 = ee.Image(S2_NDVI
+        recent_S2_ndvi = ee.Image(S2_NDVI
                      .sort('system:time_start', False)
                      .sort('CLOUD_COVER').first());
+        recent_S2_ndwi = ee.Image(S2_NDWI
+                            .sort('system:time_start', False)
+                            .sort('CLOUD_COVER').first());
         
         #Print the image’s metadata to the console to view its metadata
-        dateTaken = recent_S2.date().format().getInfo().split("T")[0]
-        print(dateTaken)
+        dateTaken_ndvi = recent_S2_ndvi.date().format().getInfo().split("T")[0]
+        dateTaken_ndwi = recent_S2_ndwi.date().format().getInfo().split("T")[0]
         
-        recent_S2_for_export = recent_S2.select('NDVI').visualize(**{
+        recent_S2_ndvi_for_export = recent_S2_ndvi.select('NDVI').visualize(**{
             'min': 0,
             'max': 1,
             'palette': ['FF0000', 'FF6E07', 'FFA500', 'FFDB00', '00FF00', '009700']
         })
-                        #red     #dark orange  #orange #yellow   #green   #dark green        
+                        #red     #dark orange  #orange #yellow   #green #dark green        
+        recent_S2_ndwi_for_export = recent_S2_ndwi.select('NDWI').visualize(**{
+            'min': -1,
+            'max': 1,
+            'palette': ['FF0000', 'FF6E07', 'FFA500', 'FFDB00', '00FF00', '009700']
+        })
+                #red     #dark orange  #orange #yellow   #green #dark green        
         
-        nameForFile = str(random.random()).replace(".", "") + '_' + dateTaken
+        nameForFileNdvi = str(random.random()).replace(".", "") + '_' + dateTaken_ndvi
+        nameForFileNdwi = "ndwi_" + nameForFileNdvi
         
         task = ee.batch.Export.image.toCloudStorage(
-            image=recent_S2_for_export,
+            image=recent_S2_ndvi_for_export,
             region=geometry,
             description='an image from the iPhone frontend',
             bucket='braga-agx-native',
-            fileNamePrefix=nameForFile,
+            fileNamePrefix=nameForFileNdvi,
             scale=1,
             crs='EPSG:4326')
         
@@ -131,7 +144,42 @@ def cors_enabled_function(request):
                 }
                 return(returnPackage, 400, headers)
 
-        print("task has completed")
+        print("ndvi task has completed")
+        
+        task = ee.batch.Export.image.toCloudStorage(
+            image=recent_S2_ndwi_for_export,
+            region=geometry,
+            description='an image from the iPhone frontend',
+            bucket='braga-agx-native',
+            fileNamePrefix=nameForFileNdwi,
+            scale=1,
+            crs='EPSG:4326')
+        
+        task.start()
+        
+        done = False
+        while done == False:
+            state = task.status()['state']
+            print(state)
+            time.sleep(5)
+            if (state == 'COMPLETED'):
+                done = True
+            if (state == 'FAILED'):
+        
+                value = {
+                    "success": task.status()['error_message'],
+                    "imageURL": "none",
+                    "dateTaken": "none"
+                }
+                
+                returnPackage = json.dumps(value)
+                # Set CORS headers for the main request
+                headers = {
+                    'Access-Control-Allow-Origin': '*'
+                }
+                return(returnPackage, 400, headers)
+        
+        print("ndwi task has completed")
         
         # Now, download it to temp file, change the format with rasterio,
         # and re-upload it to cloud storage
@@ -140,7 +188,7 @@ def cors_enabled_function(request):
         with NamedTemporaryFile() as tempTiff:
             # Extract name to the temp file
             tempTiff_file = "".join([str(tempTiff.name), "from_the_cloud.tif"])
-            blob = destination_bucket.blob(nameForFile + ".tif")
+            blob = destination_bucket.blob(nameForFileNdvi + ".tif")
             # Download the file to a destination
             blob.download_to_filename(tempTiff_file)
             
@@ -159,14 +207,43 @@ def cors_enabled_function(request):
                     with rasterio.open(tempPng_file, 'w', **profile) as dst:
                         dst.write(raster)
                         
-                    dest_blob = destination_bucket.blob(nameForFile + ".png")
+                    dest_blob = destination_bucket.blob(nameForFileNdvi + ".png")
                     dest_blob.upload_from_filename(tempPng_file)
                      
         
         
-        url = "https://storage.googleapis.com/braga-agx-native/" + nameForFile + ".png"
+        url_ndvi = "https://storage.googleapis.com/braga-agx-native/" + nameForFileNdvi + ".png"
 
+        destination_bucket = storage_client.get_bucket('braga-agx-native')
+        with NamedTemporaryFile() as tempTiff:
+            # Extract name to the temp file
+            tempTiff_file = "".join([str(tempTiff.name), "from_the_cloud.tif"])
+            blob = destination_bucket.blob(nameForFileNdwi + ".tif")
+            # Download the file to a destination
+            blob.download_to_filename(tempTiff_file)
+            
+            # convert it with rasterio
+            with rasterio.open(tempTiff_file) as infile:
+                profile=infile.profile
+                #
+                # change the driver name from GTiff to PNG
+                #
+                profile['driver']='PNG'
+                
+                with NamedTemporaryFile() as tempPng:
+                    tempPng_file = "".join([str(tempPng.name), "to_the_cloud.png"])
+                    
+                    raster=infile.read()
+                    with rasterio.open(tempPng_file, 'w', **profile) as dst:
+                        dst.write(raster)
+                        
+                    dest_blob = destination_bucket.blob(nameForFileNdwi + ".png")
+                    dest_blob.upload_from_filename(tempPng_file)
+                     
         
+        
+        url_ndwi = "https://storage.googleapis.com/braga-agx-native/" + nameForFileNdwi + ".png"
+
 
     # Set CORS headers for the main request
     headers = {
@@ -175,8 +252,11 @@ def cors_enabled_function(request):
     
     value = {
         "success": "true",
-        "imageURL": url,
-        "dateTaken": dateTaken
+        "imageURL_ndvi": url_ndvi,
+        "dateTaken_ndvi": dateTaken_ndvi,
+        "imageURL_ndwi": url_ndwi,
+        "dateTaken_ndwi": dateTaken_ndwi
+        
     }
     
     returnPackage = json.dumps(value)
